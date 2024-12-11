@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="X-UA-Compatible" content="ie=edge">
+        <title>Engineering Notebook</title>
+    </head>
+    <body>
+        <h1>Engineering Notebook</h1>
+        <h3 style="margin-bottom: 80px; padding-bottom: 25px; border-bottom: 1px solid black;">By Boyan Gankov</h3>
+
+        <h2>Clipped</h2>
+        <p>This program generates two versions of a sinwave as a wav file — a pure sinwave, as well as a clipped one. The frequency (in hz) is set by the user on
+            running the program. Both wav files are 1 second long, and I've linked a sample output from the program below. This example was given 220hz as its input.
+        </p>
+
+        <h3 style="margin-top:40px;">Normal Wave:</h3>
+        <audio controls>
+            <source src="./code/Clipped/wave.wav" type="audio/wav">
+            Your browser does not support this audio element.
+        </audio>
+
+        <p style="font-weight: bold; font-size: 14px; margin-top:40px;">! WARNING !</p>
+        <p>The samples might be loud</p>
+
+        <h3>Clipped Wave:</h3>
+        <audio style="margin-bottom:40px;" controls>
+            <source src="./code/Clipped/clipped.wav" type="audio/wav">
+            Your browser does not support this audio element.
+        </audio>
+
+        <p>The program utilises the following libraries: numpy for creating a time array for the samples, scipi for writing out a wav file, and sounddevice for 
+            audio playback within the program.
+        </p>
+
+        <pre>
+            
+            clipped.py
+            ________________________________________________________________________
+
+
+            import numpy as np
+            import sounddevice as sd
+            from scipy.io import wavfile
+            
+            frequency = float(input("Please enter the frequency of the wave (in Hz): "))
+            
+            amplitude = 8192 #1/4 of 32767 (max for a 16bit signed int)
+            duration = 1 #seconds
+            sample_rate = 48_000 #samples / sec
+            
+            t = np.linspace(0, duration, sample_rate, dtype=np.float64, endpoint=False)
+            
+            # Normal wave
+            wav = amplitude * np.sin(2 * np.pi * frequency * t)
+            wav_int16 = wav.astype(np.int16)
+            
+            wavfile.write('wave.wav', sample_rate, wav_int16)
+            
+            sd.play(wav_int16, samplerate=sample_rate)
+            sd.wait()
+            
+            # Clipped wave
+            amplitude = 16384 #1/2 amplitude wave
+            
+            clipped_wav = amplitude * np.sin(2 * np.pi * frequency * t)
+            clipped_wav = np.clip(clipped_wav, -8192, 8192)
+            clipped_wav_int16 = clipped_wav.astype(np.int16)
+            
+            wavfile.write('clipped.wav', sample_rate, clipped_wav_int16)
+            
+            sd.play(clipped_wav_int16, samplerate=sample_rate)
+            sd.wait()
+        </pre>
+
+        <h2 style="margin-top: 100px; padding-top: 25px; border-top: 1px solid black;">Nyquist Limit</h2>
+        <p>When learning about this phenomenon, I was very curious about any applications where people leveraged this as an effect. One of the only applications was in a bitcrush effects pedal for guitar. I found a demo of one I actually really like, the 
+            Red Panda Bitmap 2 Bitcrusher pedal.
+        </p>
+        <p><a href="https://www.youtube.com/watch?v=JiX1jGpTKJU&t=60s" target="_blank">Demo</a></p>
+
+        <p>There is a part in the demo where he is only adjusting the samplerate, with the other knobs all dialed off. This really lets the effect of breaking Nyquist shine. The frequency adjuster knob changes the sample rate from 48khz all the way down to 110hz! 
+            As you can hear in the demo, when this knob is turned up past a certain point, it just sounds like horrible crunchy noise, as all of the higher frequencies above it are being squashed into the lower ones.
+        </p>
+
+        <h2 style="margin-top: 100px; padding-top: 25px; border-top: 1px solid black;">FFTs (and finding the dominant frequency)</h2>
+        <p>This program takes in a wav file as input, and creates Hanning windows from the start to the end. Each of these Hanning windows is an FFT calculation
+            that we then perform some math on to find the dominant frequency of that particular window. My first thoughts were to make sure that the windows do not 
+            overlap at all — as to not double count any frequencies, however I remembered something you said about overlapping windows in class which made me pause.
+            When I read into it, I found that the lower the overlap between windows, the lower the frequency resolution (and the better the time resolution). While 
+            they do have a faster computation time, I opted to overlap the windows by 30% and swallow any double counts for the sake of the frequency resolution.
+        </p>
+
+        <p>I got help from chatGPT to write the read_wav_file function, and it reshapes 2 channel wav files into 1 channel! Great, now we can do our Hanning
+            windows. I started by setting the step size, which was 30% of the window size, or 30% overlap between the windows. I then count how many windows 
+            we will need based on the length of the data. Then we enter a loop that performs the FFT on each window and if the dominant frequency of that
+            window is greater than zero, it gets counted in a dominant frequency array that I used collections from the Counter library to do! The main 
+            function just sets everything up and prints the top 5 frequencies as well as how many times they appear. 
+        </p>
+
+        <p>I found an interesting bug while messing with this code, sometimes the end of the data was shorter than the last window, causing the program 
+            to crash when I input echomorph-nohpf.wav -
+        </p> 
+        <pre>ValueError: operands could not be broadcast together with shapes (962,) (1024,)</pre>
+        <p>Below is the full script - </p>
+
+        <pre>
+            
+            
+            frequency-finder.py
+            ________________________________________________________________________
+
+
+            import numpy as np
+            from scipy.io import wavfile
+            from collections import Counter
+            
+            def read_wav_file(file_path):
+                sample_rate, data = wavfile.read(file_path)
+                return sample_rate, np.array(data, dtype=np.float16)
+            
+            def get_dominant_frequencies(data, sample_rate, window_size):
+                # 30% window overlap
+                step_size = int(window_size * .7)
+                window_count = len(data) // step_size
+            
+                dominant_frequencies = []
+                
+                for i in range(window_count):
+                    start = i * step_size
+                    end = start + window_size
+                    # This creates hanning windows spanning the start to the end of the audio input
+                    window = data[start:end] * np.hanning(window_size)
+            
+                    fft_result = np.fft.rfft(window)
+                    fft_magnitudes = np.abs(fft_result)
+                    # Returns the maxmimum values of the magnitudes multipled by the sample rate
+                    # over the window size to find the dominant frequency 
+                    dominant_frequency = np.argmax(fft_magnitudes) * (sample_rate / window_size)
+            
+                    # I don't want to count 0hz as a frequency if there was only silence in a window
+                    if(dominant_frequency > 0):
+                        dominant_frequencies.append(dominant_frequency)
+            
+                return dominant_frequencies
+            
+            def main():
+                file_path = "./wavs/gc.wav"
+            
+                window_size = 1024
+                sample_rate, data = read_wav_file(file_path)
+            
+                dominant_frequencies = get_dominant_frequencies(data, sample_rate, window_size)
+            
+                # Ranks and stores all dominant frequencies before filtering out the top 5 to be printed
+                frequency_counter = Counter(dominant_frequencies)
+                ranked_frequencies = frequency_counter.most_common(5)
+            
+                print("\nTop 5 most common dominant frequencies:")
+                for freq, count in ranked_frequencies:
+                    print(f"Frequency: {freq:.2f} Hz, Count: {count}")
+            
+            if __name__ == "__main__":
+                main()
+        </pre>
+
+        <p>Here are some sample outputs that worked using wavs available in the course directory: </p>
+
+        <pre>
+          
+            using gc.wav - 
+
+            Top 5 most common dominant frequencies:
+            Frequency: 234.38 Hz, Count: 445
+            Frequency: 187.50 Hz, Count: 427
+            Frequency: 140.62 Hz, Count: 404
+            Frequency: 375.00 Hz, Count: 65
+            Frequency: 750.00 Hz, Count: 64
+
+            using collectathon.wav - 
+
+            Top 5 most common dominant frequencies:
+            Frequency: 43.07 Hz, Count: 1727
+            Frequency: 129.20 Hz, Count: 616
+            Frequency: 86.13 Hz, Count: 335
+            Frequency: 172.27 Hz, Count: 295
+            Frequency: 990.53 Hz, Count: 232
+        </pre>
+
+        <h2 style="margin-top: 100px; padding-top: 25px; border-top: 1px solid black;">Digitial Filtering</h2>
+        <p>This program takes in a wav file as input and applies a lowpass filter, cutting off all frequencies above 200hz. I used scipy.signal's 
+            butterworth filter to design it, and then lfilter to apply it. I reused the same function to read wav files from frequency-finder found 
+            in the FFT directory. I then write the output of the filter to another wav file. 
+        </p>
+
+        <p>Running this script on a song immediately makes it sound like its coming from the houseparty next door when you're trying to sleep.
+        </p>
+
+
+        <h3 style="margin-top:40px;">Normal collectathon:</h3>
+        <audio controls>
+            <source src="./wavs/collectathon.wav" type="audio/wav">
+            Your browser does not support this audio element.
+        </audio>
+
+        <h3>Muffled collectathon:</h3>
+        <audio style="margin-bottom:40px;" controls>
+            <source src="./wavs/collectathon-muffled.wav" type="audio/wav">
+            Your browser does not support this audio element.
+        </audio>
+
+        <pre>
+            lowpass.py
+            ________________________________________________________________________
+
+
+            import numpy as np
+            from scipy.io import wavfile
+            from scipy.signal import butter, lfilter
+            
+            def low_pass_filter(data, sample_rate, cutoff_freq=200, order=4):
+                # Designs the low-pass filter using a Butterworth filter from scipy.signal
+                nyquist = 0.5 * sample_rate 
+                normal_cutoff = cutoff_freq / nyquist
+                b, a = butter(order, normal_cutoff, btype='low', analog=False)
+            
+                # Apply the filter to the data using lfilter from scipy.signal
+                filtered_data = lfilter(b, a, data)
+                return filtered_data
+            
+            def read_wav_file(file_path):
+                """I repurposed the function chatGPT gave me from frequency_finder.py in ../FFT"""
+                sample_rate, data = wavfile.read(file_path)
+                if len(data.shape) > 1 and data.shape[1] > 1:
+                    data = np.mean(data, axis=1)
+                return data, sample_rate
+            
+            def write_low_wav(file_path, data, sample_rate):
+                wavfile.write(file_path, sample_rate, np.int16(data))
+            
+            def main():
+                input_file_path = "./wavs/collectathon.wav"
+                output_file_path = "./wavs/collectathon-muffled.wav"
+            
+                data, sample_rate = read_wav_file(input_file_path)
+                filtered_data = low_pass_filter(data, sample_rate, cutoff_freq=200)
+            
+            
+                write_low_wav(output_file_path, filtered_data, sample_rate)
+            
+            if __name__ == "__main__":
+                main()
+        </pre>
+
+        <h2 style="margin-top: 100px; padding-top: 25px; border-top: 1px solid black;">Adaptive Tone Control</h2>
+        <p>This program might(?) do what its intended to do, but it also introduces a TON of noise into whatever the 
+            unfortunate output file is. I used numpy's FFTs and scipy's reverse FFTs to apply the tone control effect 
+            after finding the average power in each band. 
+        </p>
+
+        <p>The script first reads from a hardcoded wav file, (I'm going to keep repurposing the function chatGPT helped 
+            me with to read from wav files and change 2 channel audio to single (found in ../FFT/frequency-finder.py))
+            Then the audio gets processed by 30% overlapping hanning windows where an FFT is applied and we calculate each 
+            band's average energy. Then we apply the tone control to each band where each band's current energy is found,
+            then a scale factor is calculated to get it to the target energy. The right frequency band is selected, and 
+            the scaler is applied. Once this process has been applied to all three bands, they should each be equalized.
+            Example of the horror audio below.
+        </p>
+
+
+
+        <h3 style="margin-top:40px;">Normal collectathon:</h3>
+        <audio controls>
+            <source src="./wavs/collectathon.wav" type="audio/wav">
+            Your browser does not support this audio element.
+        </audio>
+
+        <p style="font-weight: bold; font-size: 14px; margin-top:40px;">! WARNING !</p>
+        <p>The samples are loud, something went horribly wrong here...</p>
+
+        <h3>Equalized collectathon:</h3>
+        <audio  controls>
+            <source src="./wavs/leveled_collectathon.wav" type="audio/wav">
+            Your browser does not support this audio element.
+        </audio>
+
+        <p>I'm stumped because when I trace my steps I think I'm doing everything right, however something is clearly going
+            wrong — the bass is gone, the highs are shrill, and there is SO MUCH NOISE. Program below.
+        </p>
+
+        <pre>
+
+
+            average_tone.py
+            ________________________________________________________________________
+
+
+            import numpy as np
+            from scipy.io import wavfile
+            from scipy.fft import rfft, irfft
+            
+            
+            def read_wav_file(file_path):
+                """I repurposed the function chatGPT gave me from frequency_finder.py in ../FFT"""
+                sample_rate, data = wavfile.read(file_path)
+                if len(data.shape) > 1 and data.shape[1] > 1:
+                    data = np.mean(data, axis=1)
+                return data, sample_rate
+            
+            
+            def write_wav_file(file_path, data, sample_rate):
+                wavfile.write(file_path, sample_rate, np.clip(data, -32768, 32767).astype(np.int16))
+            
+            
+            def process_audio(data, sample_rate, window_size=1024):
+                # 30% overlapping windows
+                step_size = int(window_size * (.7)) 
+            
+                # Calculates the number of windows based on the input length
+                num_windows = (len(data) - window_size) // step_size + 1
+                output_data = np.zeros_like(data, dtype=np.float64)
+            
+                # Frequency band limits (low, mid, high)
+                low_band = (0, 300)
+                mid_band = (300, 2000)
+                # This ends the high band right at the Nyquist frequency
+                high_band = (2000, sample_rate // 2)
+            
+            
+                for i in range(num_windows):
+                    start = i * step_size
+                    end = start + window_size
+                    window_data = data[start:end] * np.hanning(window_size) 
+            
+                    # Applies an FFT to get the frequency spectrum
+                    spectrum = rfft(window_data)
+                    
+                    # Generates array of frequencies for bins which match len(spectrum[])
+                    freqs = np.fft.fftfreq(window_size, 1/sample_rate)[:len(spectrum)]
+            
+                    # Calculates energy in each band
+                    low_energy = calculate_band_energy(spectrum, freqs, low_band)
+                    mid_energy = calculate_band_energy(spectrum, freqs, mid_band)
+                    high_energy = calculate_band_energy(spectrum, freqs, high_band)
+            
+                    # Average energy across all bands
+                    avg_energy = (low_energy + mid_energy + high_energy) / 3
+            
+                    # Applies tone control to balance the energy
+                    spectrum = apply_tone_control(spectrum, freqs, avg_energy, low_band)
+                    spectrum = apply_tone_control(spectrum, freqs, avg_energy, mid_band)
+                    spectrum = apply_tone_control(spectrum, freqs, avg_energy, high_band)
+            
+                    # Reconstructs the time-domain signal for this window
+                    filtered_window = irfft(spectrum)
+            
+                    # Stores the overlapping filtered windows in the array
+                    output_data[start:end] += filtered_window
+            
+                return output_data.astype(np.int16)
+            
+            
+            def calculate_band_energy(spectrum, freqs, band_limits):
+                # Selects only the frequencies the band covers
+                band_mask = (freqs >= band_limits[0]) & (freqs < band_limits[1])
+            
+                # Energy is magnitude squared
+                band_spectrum = np.abs(spectrum[band_mask])**2  
+            
+                return np.mean(band_spectrum)
+            
+            
+            def apply_tone_control(spectrum, freqs, target_band_energy, band_limits):
+                band_energy = calculate_band_energy(spectrum, freqs, band_limits)
+            
+                # Scale to match target energy
+                scale_factor = np.sqrt(target_band_energy / band_energy)
+            
+                # Selects only the frequencies the band covers and scales them to the target
+                band_mask = (freqs >= band_limits[0]) & (freqs < band_limits[1])
+            
+                # Adjusts the amplitude in the band
+                spectrum[band_mask] *= scale_factor 
+                return spectrum
+            
+            
+            def main():
+                input_file_path = "./wavs/collectathon.wav"
+                output_file_path = "./wavs/leveled_collectathon.wav"
+            
+                data, sample_rate = read_wav_file(input_file_path)
+                output_data = process_audio(data, sample_rate)
+            
+                write_wav_file(output_file_path, output_data, sample_rate)
+            
+            
+            if __name__ == "__main__":
+                main()
+        </pre>
+
+        <h2 style="margin-top: 100px; padding-top: 25px; border-top: 1px solid black;">Vocoder (exploration)</h2>
+        <p>I used to have a Korg Minilogue synth, which I did not understand at the time at all. All of the functions 
+            at the time went over my head and I didn't know where to start learning. There were presets which were loads
+            of fun however. Throughout this segment where you talk about synthesis I've learned a lot of terms and functions 
+            that used to be written on my Minilogue. I think that I would feel a lot more comfortable now setting these 
+            paramaters and understanding what they do now. There is still something in the realm of synths that I don't 
+            understand, well there's a lot of things but I'm thinking of vocoders. I know they can somehow be used to 
+            give you a robotic voice but that's where my knowlege ends. 
+        </p>
+
+        <p>Then I read the wikipedia page for Vocoders, found 
+            <a href="https://en.wikipedia.org/wiki/Vocoder" target="_blank">here</a>
+            as well as watched 
+            <a href="https://www.youtube.com/watch?v=UPzFoAbwagY" target="_blank">this</a>
+            youtube video that dove into a crash course of what vocoders can do in music production. Both were fascinating in 
+            different ways. The wikipedia page focused on the history, development, and usage of vocoders, while the video 
+            talked about how I can use a vocoder, and specifically a digital one via plugin to make music. 
+        </p>
+
+        <p>Apparently the first vocoder was developed in 1928 at Bell Labs to try and synthesize speech. It showcased at 
+            the 1939 world fair, and used in WW2 as an encrypted communication transmittor. From what I read, it sounded like 
+            vocoders didn't really take off musically until the 70's. The first one used as an instrument was in 1959, called 
+            the Siemens Synthesizer. 
+        </p>
+
+        <p>But how do they achieve this effect? There are two parts to a vocoder, the carrier and the modulator. The carrier 
+            seems to typically be an instrument or a sound, and the modulator is usually a human voice. The carrier signal 
+            is passed through a series of bandpass filters, fed into a VCA (voltage controlled amplifer). The modulator is run 
+            through identical bandpass filters, and finally through a series of envelope followers (these will follow the
+            amplitude of the modulator signal). This alllows the carrier signal to approximate the modulator, causing the 
+            effect we hear! Vocoders are a lot more musical now especially since we can control them digitally. 
+        </p>
+
+        <p>Vocoders!</p>
+
+
+
+        <h2 style="margin-top: 100px; padding-top: 25px; border-top: 1px solid black;">Popgen</h2>
+        <p>What I decided to do for popgen was to create an ADSR envelope to get rid of the notes popping, as well as 
+            create a command line argument to be able to switch the wave shape from a pure sin wave to a square wave.
+        </p>
+
+        <pre>
+
+            def adsr_envelope(duration, attack=0.1, decay=0.1, sustain=0.5, release=0.3):
+    
+                # Total length of the envelope
+                attack_samples = int(duration * attack)
+                decay_samples = int(duration * decay)
+                sustain_samples = int(duration * sustain)
+                release_samples = int(duration * release)
+                
+                envelope = np.zeros(duration)
+                
+                #Applies the ADSR envelope to the samples
+                envelope[:attack_samples] = np.linspace(0, 1, attack_samples)
+                envelope[attack_samples:attack_samples + decay_samples] = np.linspace(1, sustain, decay_samples)
+                envelope[attack_samples + decay_samples:attack_samples + decay_samples + sustain_samples] = sustain
+                envelope[attack_samples + decay_samples + sustain_samples:] = np.linspace(sustain, 0, release_samples)
+                
+                return envelope
+        </pre>
+
+        <p>This function generates the envelope with the parameters I want. I call it in make_note() where I modifed the
+            function to use the envelope shown below.
+        </p>
+
+        <pre>
+
+            def make_note(key, n=1):
+                f = 440 * 2 ** ((key - 69) / 12)
+                b = beat_samples * n
+                cycles = 2 * np.pi * f * b / samplerate
+                t = np.linspace(0, cycles, b)
+                waveform = np.sin(t)
+                
+                # Generate the envelope and apply it to the waveform
+                envelope = adsr_envelope(len(waveform), attack=0.1, decay=0.1, sustain=0.5, release=0.3)
+                return waveform * envelope
+        </pre>
+
+        <p>Then, I added a command line argument to allow the user to switch between a sin or a square wave.
+        </p>
+
+        <pre>           ap.add_argument('--waveType', choices=['sin', 'square'], default='sin', help="Select the wave type for the notes (sin or square).")</pre>
+
+        <p>Actually implementing it took a little more brain power. I make changes to the make_note() and play() functions.
+            In play(), the melody and bass needed a paramater to parse a wave_type as well as envelope parameters in case we 
+            want to change them later.
+        </p>
+
+        <pre>           melody = np.concatenate([make_note(i + melody_root, n=1, wave_type=args.waveType, attack=0.1, decay=0.1, sustain=0.6, release=0.2) for i in notes])
+            
+           bass = make_note(bass_note + bass_root, n=4, wave_type=args.waveType, attack=0.1, decay=0.1, sustain=0.6, release=0.2)
+        </pre>          
+
+        <p>Finally, I updated the make_note() function to take a wave_type parameter and based on it switch the wave type from 
+            sin to square. This is down using the np.sign() function converting all positive values to a 1 and all negative ones 
+            into a -1. This results in a square wave. Underneath the function there are some samples where you can hear the envelope 
+            and the square waves! I think they sound really nice. 
+        </p>
+
+        <pre>
+
+            def make_note(key, n=1, wave_type="sine", attack=0.1, decay=0.1, sustain=0.6, release=0.2):
+                f = 440 * 2 ** ((key - 69) / 12)
+                b = beat_samples * n
+                cycles = 2 * np.pi * f * b / samplerate
+                t = np.linspace(0, cycles, b)
+            
+                waveform = np.sin(t)
+                if wave_type == "square":
+                    # Square wave: +1 or -1 based on sine wave
+                    waveform = np.sign(np.sin(t))
+                
+                # Generate the envelope and apply it to the waveform
+                envelope = adsr_envelope(len(waveform), attack, decay, sustain, release)
+                return waveform * envelope
+        </pre>
+
+
+        <h3 style="margin-top:40px;">Sin wave Popgen</h3>
+        <audio controls>
+            <source src="./wavs/sin-pop.wav" type="audio/wav">
+            Your browser does not support this audio element.
+        </audio>
+
+        <p style="font-weight: bold; font-size: 14px; margin-top:40px;">! WARNING !</p>
+        <p>The samples might be loud</p>
+        <h3>Square wave Popgen</h3>
+        <audio  controls>
+            <source src="./wavs/square-pop.wav" type="audio/wav">
+            Your browser does not support this audio element.
+        </audio>
+
+        <h2 style="margin-top: 100px; padding-top: 25px; border-top: 1px solid black;">Final Project - Ferrofluid Sound Visualizer</h2>
+        <p>I made a whole writeup on my final project that I felt was too long to include in the notebook, so I made it a standalone page. You can find it
+            <a href="./final.html" target="_blank">here!</a> 
+        </p>
+
+        <h2 style="margin-top: 100px; padding-top: 25px; border-top: 1px solid black;">Closing Notes</h2>
+        <p>As you've noticed by now, for this Engineering Notebook, I chose to use HTML instead of markdown. I chose this because I have more control over the overall structure and look (and I can embed cool pictures and video and audio). I hope that's alright. 
+            My only regret this term was not prioritizing keeping up with the portfolio. You won't see any git commits before the last few days, and that's because I didn't document any of the code I wrote or exploration I did over the term while I did it. I should have, and I 
+            can give you excuses as to why I didn't, but I don't think they matter. I've spent the last few days compiling everything I've worked on over the term into this format and structure, so you'll have to decide for yourself what you think. With that out of the way though, I really enjoyed 
+            taking this class, I learned a lot, never felt bored, and was able to apply my skills to learn something new (and create something really cool!). I've always loved music, both listening to it but also playing instruments, and I know an enthusiest level of 
+            how a lot of analog audio equipment is used and goes together. This class helped fill a lot of gaps between and connect things in that realm which I really enjoyed and will continue to use! It was hard to pick one, but I think my favorite part of the term 
+            was the live coding we did with the rhosy synth. I've never actually dived into synthesis despite having an interest in it, and seeing one come to life from nothing was incredible. I might try building my own with some of the techniques you talked about and 
+            showed us, and I can reference your source code too. 
+        </p>
+
+        <p style="margin-bottom:50px;">Anyways, thanks for a great term and happy holidays.</p>
+    </body>
+</html>
